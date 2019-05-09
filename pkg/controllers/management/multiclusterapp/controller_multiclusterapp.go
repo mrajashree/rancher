@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
+	"sort"
 )
 
 const (
@@ -99,7 +100,7 @@ func (m *MCAppManager) sync(key string, mcapp *v3.MultiClusterApp) (runtime.Obje
 		return mcapp, err
 	}
 
-	changed, err := m.isChanged(mcapp)
+	changed, rolesBasedChange, err := m.isChanged(mcapp)
 	if err != nil {
 		return mcapp, err
 	}
@@ -123,7 +124,6 @@ func (m *MCAppManager) sync(key string, mcapp *v3.MultiClusterApp) (runtime.Obje
 	if err != nil {
 		return resp.object, err
 	}
-
 	if !changed {
 		if mcapp.Status.RevisionName == "" {
 			return m.setRevisionAndUpdate(mcapp, creatorID)
@@ -142,6 +142,7 @@ func (m *MCAppManager) sync(key string, mcapp *v3.MultiClusterApp) (runtime.Obje
 	}
 
 	for i, app := range resp.updateApps {
+		pv3.AppConditionUserTriggeredAction.True(app)
 		if _, err := m.updateApp(app, answerMap, externalID, resp.projects[i]); err != nil {
 			return mcapp, err
 		}
@@ -149,6 +150,9 @@ func (m *MCAppManager) sync(key string, mcapp *v3.MultiClusterApp) (runtime.Obje
 		if resp.remaining == 0 {
 			break
 		}
+	}
+	if rolesBasedChange {
+		return m.setRevisionAndUpdate(mcapp, creatorID)
 	}
 
 	setInstalledUnknown(mcapp)
@@ -204,7 +208,7 @@ func (m *MCAppManager) createApps(mcapp *v3.MultiClusterApp, externalID string, 
 			}
 			appUpdated := false
 			if app.Spec.ExternalID == externalID {
-				if reflect.DeepEqual(app.Spec.Answers, getAnswerMap(answerMap, t.ProjectName)) {
+				if reflect.DeepEqual(app.Spec.Answers, getAnswerMap(answerMap, t.ProjectName)) && pv3.AppConditionInstalled.IsTrue(app) {
 					appUpdated = true
 				}
 			}
@@ -247,7 +251,6 @@ func (m *MCAppManager) createApps(mcapp *v3.MultiClusterApp, externalID string, 
 		}
 		resp.object = upd
 	}
-
 	resp.updateApps = updateApps
 	resp.projects = projects
 	resp.count = count
@@ -305,7 +308,34 @@ func (m *MCAppManager) createRevision(mcapp *v3.MultiClusterApp, creatorID strin
 	revision.Answers = mcapp.Spec.Answers
 	revision.TemplateVersionName = mcapp.Spec.TemplateVersionName
 	revision.Namespace = namespace.GlobalNamespace
+	revision.Roles = mcapp.Spec.Roles
 	return m.multiClusterAppRevisions.Create(revision)
+}
+
+func (m *MCAppManager) setRevisionNew(mcapp *v3.MultiClusterApp, creatorID string) (*v3.MultiClusterApp, error) {
+	latestMcApp, err := m.multiClusterApps.GetNamespaced(namespace.GlobalNamespace, mcapp.Name, metav1.GetOptions{})
+	if err != nil {
+		return mcapp, err
+	}
+	if latestMcApp.Status.RevisionName != "" {
+		currRevision, err := m.multiClusterAppRevisionLister.Get(namespace.GlobalNamespace, latestMcApp.Status.RevisionName)
+		if err != nil {
+			return mcapp, err
+		}
+		sort.Strings(latestMcApp.Spec.Roles)
+		sort.Strings(currRevision.Roles)
+		if currRevision.TemplateVersionName == mcapp.Spec.TemplateVersionName &&
+			reflect.DeepEqual(currRevision.Answers, mcapp.Spec.Answers) && reflect.DeepEqual(latestMcApp.Spec.Roles, currRevision.Roles) {
+			return mcapp, nil
+		}
+		mcapp = latestMcApp
+	}
+	rev, err := m.createRevision(mcapp, creatorID)
+	if err != nil {
+		return mcapp, err
+	}
+	mcapp.Status.RevisionName = rev.Name
+	return mcapp, nil
 }
 
 func (m *MCAppManager) setRevisionAndUpdate(mcapp *v3.MultiClusterApp, creatorID string) (*v3.MultiClusterApp, error) {
@@ -318,8 +348,10 @@ func (m *MCAppManager) setRevisionAndUpdate(mcapp *v3.MultiClusterApp, creatorID
 		if err != nil {
 			return mcapp, err
 		}
+		sort.Strings(latestMcApp.Spec.Roles)
+		sort.Strings(currRevision.Roles)
 		if currRevision.TemplateVersionName == mcapp.Spec.TemplateVersionName &&
-			reflect.DeepEqual(currRevision.Answers, mcapp.Spec.Answers) {
+			reflect.DeepEqual(currRevision.Answers, mcapp.Spec.Answers) && reflect.DeepEqual(latestMcApp.Spec.Roles, currRevision.Roles) {
 			return mcapp, nil
 		}
 		mcapp = latestMcApp
@@ -333,21 +365,29 @@ func (m *MCAppManager) setRevisionAndUpdate(mcapp *v3.MultiClusterApp, creatorID
 	return m.updateCondition(mcapp, setInstalledDone)
 }
 
-func (m *MCAppManager) isChanged(mcapp *v3.MultiClusterApp) (bool, error) {
+func (m *MCAppManager) isChanged(mcapp *v3.MultiClusterApp) (bool, bool, error) {
 	if mcapp.Status.RevisionName == "" {
-		return false, nil
+		return false, false, nil
 	}
 	mcappRevision, err := m.multiClusterAppRevisionLister.Get(namespace.GlobalNamespace, mcapp.Status.RevisionName)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if mcapp.Spec.TemplateVersionName != mcappRevision.TemplateVersionName {
-		return true, nil
+		return true, false, nil
 	}
 	if !reflect.DeepEqual(mcapp.Spec.Answers, mcappRevision.Answers) {
-		return true, nil
+		return true, false, nil
 	}
-	return false, nil
+	if len(mcapp.Spec.Roles) != len(mcappRevision.Roles) {
+		return true, true, nil
+	}
+	sort.Strings(mcapp.Spec.Roles)
+	sort.Strings(mcappRevision.Roles)
+	if !reflect.DeepEqual(mcapp.Spec.Roles, mcappRevision.Roles) {
+		return true, true, nil
+	}
+	return false, false, nil
 }
 
 func (m *MCAppManager) toUpdate(mcapp *v3.MultiClusterApp) (bool, error) {
