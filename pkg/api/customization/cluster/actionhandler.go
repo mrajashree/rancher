@@ -31,6 +31,15 @@ func (a ActionHandler) ClusterActionHandler(actionName string, action *types.Act
 		return apiContext.AccessControl.CanDo(v3.ClusterGroupVersionKind.Group, v3.ClusterResource.Name, "update", apiContext, cluster, apiContext.Schema) == nil
 	}
 
+	canBackupEtcd := func() bool {
+		etcdBackupSchema := types.Schema{ID: mgmtclient.EtcdBackupType}
+		// pkg/rbac/access_control.go:55 canAccess checks for the object's ID or namespace. The ns for etcdbackup will be the clusterID
+		backupMap := map[string]interface{}{
+			"namespaceId": apiContext.ID,
+		}
+		return apiContext.AccessControl.CanDo(v3.EtcdBackupGroupVersionKind.Group, v3.EtcdBackupResource.Name, "create", apiContext, backupMap, &etcdBackupSchema) == nil
+	}
+
 	switch actionName {
 	case v3.ClusterActionGenerateKubeconfig:
 		return a.GenerateKubeconfigActionHandler(actionName, action, apiContext)
@@ -56,7 +65,7 @@ func (a ActionHandler) ClusterActionHandler(actionName string, action *types.Act
 		}
 		return a.disableMonitoring(actionName, action, apiContext)
 	case v3.ClusterActionBackupEtcd:
-		if !canUpdateCluster() {
+		if !canBackupEtcd() {
 			return httperror.NewAPIError(httperror.Unauthorized, "can not backup etcd")
 		}
 		return a.BackupEtcdHandler(actionName, action, apiContext)
