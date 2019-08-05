@@ -46,6 +46,15 @@ func (g *googleOauthProvider) getUserInfoAndGroups(adminSvc *admin.Service, gOAu
 			return userPrincipal, groupPrincipals, err
 		}
 	}
+	groupMap := make(map[string]bool)
+	nestedGroupPrincipals := []v3.Principal{}
+	for _, principal := range groupPrincipals {
+		if err = g.gatherParentGroups(principal, adminSvc, config, user.HostedDomain, groupMap, &nestedGroupPrincipals); err != nil {
+			return userPrincipal, groupPrincipals, err
+		}
+	}
+	groupPrincipals = append(groupPrincipals, nestedGroupPrincipals...)
+
 	logrus.Debugf("[Google OAuth] loginuser: Retrieved user's groups using admin directory")
 	return userPrincipal, groupPrincipals, nil
 }
@@ -203,6 +212,30 @@ func (g *googleOauthProvider) paginateResults(adminSvc *admin.Service, hostedDom
 	default:
 		return nil, nil, fmt.Errorf("paginateResults: Invalid principal type")
 	}
+}
+
+func (g *googleOauthProvider) gatherParentGroups(groupPrincipal v3.Principal, adminSvc *admin.Service, config *v3.GoogleOauthConfig, hostedDomain string, groupMap map[string]bool, nestedGroupPrincipals *[]v3.Principal) error {
+	groupMap[groupPrincipal.ObjectMeta.Name] = true
+	parts := strings.SplitN(groupPrincipal.ObjectMeta.Name, ":", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid id %v", groupPrincipal.ObjectMeta.Name)
+	}
+	groupEmail := strings.TrimPrefix(parts[1], "//")
+	groups, err := g.getGroupsUserBelongsTo(adminSvc, groupEmail, hostedDomain, config)
+	if err != nil {
+		return err
+	}
+	for _, group := range groups {
+		if groupMap[group.ObjectMeta.Name] {
+			continue
+		} else {
+			*nestedGroupPrincipals = append(*nestedGroupPrincipals, group)
+			if err = g.gatherParentGroups(group, adminSvc, config, hostedDomain, groupMap, nestedGroupPrincipals); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (g *googleOauthProvider) getdirectoryServiceFromStoredToken(storedOauthToken string, config *v3.GoogleOauthConfig) (*admin.Service, error) {
