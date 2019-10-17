@@ -144,6 +144,20 @@ def test_cloned_role_permissions(admin_mc, remove_resource, user_factory,
     assert project.actions.enableMonitoring
 
 
+def test_update_role_template_permissions(admin_mc, remove_resource,
+                                          user_factory, admin_cc):
+    client = admin_mc.client
+    user_member = user_factory()
+    user_client = user_member.client
+    crtb = client.create_cluster_role_template_binding(
+        userId=user_member.id,
+        roleTemplateId="cluster-member",
+        clusterId=admin_cc.cluster.id,
+    )
+    remove_resource(crtb)
+    wait_until_available(user_client, admin_cc.cluster)
+
+
 def wait_for_role_template_creation(admin_mc, rt_name, timeout=60):
     start = time.time()
     interval = 0.5
