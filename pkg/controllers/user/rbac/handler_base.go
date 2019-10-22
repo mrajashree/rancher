@@ -163,33 +163,27 @@ func (m *manager) ensureRoles(rts map[string]*v3.RoleTemplate) error {
 			returnErr = err
 		}
 	}
+	// logging all errors, returning one to indicate "error" to caller
 	return returnErr
 }
 
 func (m *manager) ensureClusterRoles(rt *v3.RoleTemplate) error {
 	clusterRoleCli := m.workload.RBAC.ClusterRoles("")
 	if clusterRole, err := m.crLister.Get("", rt.Name); err == nil && clusterRole != nil {
-		if reflect.DeepEqual(clusterRole.Rules, rt.Rules) {
+		err := m.compareAndUpdateClusterRole(clusterRole, rt)
+		if err == nil {
 			return nil
 		}
-		clusterRole = clusterRole.DeepCopy()
-		clusterRole.Rules = rt.Rules
-		logrus.Infof("Updating clusterRole %v because of rules difference with roleTemplate %v (%v).", clusterRole.Name, rt.DisplayName, rt.Name)
-		_, err := clusterRoleCli.Update(clusterRole)
-		if err != nil && apierrors.IsConflict(err) {
+		if apierrors.IsConflict(err) {
 			// get object from etcd and retry
 			clusterRole, err := m.clusterRoles.Get(rt.Name, metav1.GetOptions{})
 			if err != nil && !apierrors.IsNotFound(err) {
 				return errors.Wrapf(err, "error getting clusterRole %v", rt.Name)
 			}
-			if reflect.DeepEqual(clusterRole.Rules, rt.Rules) {
-				return nil
+			if err := m.compareAndUpdateClusterRole(clusterRole, rt); err != nil {
+				return err
 			}
-			clusterRole = clusterRole.DeepCopy()
-			clusterRole.Rules = rt.Rules
-			_, err = clusterRoleCli.Update(clusterRole)
-		}
-		if err != nil {
+		} else {
 			return errors.Wrapf(err, "couldn't update clusterRole %v", rt.Name)
 		}
 		return nil
@@ -206,6 +200,17 @@ func (m *manager) ensureClusterRoles(rt *v3.RoleTemplate) error {
 		return errors.Wrapf(err, "couldn't create clusterRole %v", rt.Name)
 	}
 	return nil
+}
+
+func (m *manager) compareAndUpdateClusterRole(clusterRole *rbacv1.ClusterRole, rt *v3.RoleTemplate) error {
+	if reflect.DeepEqual(clusterRole.Rules, rt.Rules) {
+		return nil
+	}
+	clusterRole = clusterRole.DeepCopy()
+	clusterRole.Rules = rt.Rules
+	logrus.Infof("Updating clusterRole %v because of rules difference with roleTemplate %v (%v).", clusterRole.Name, rt.DisplayName, rt.Name)
+	_, err := m.workload.RBAC.ClusterRoles("").Update(clusterRole)
+	return err
 }
 
 func (m *manager) ensureNamespacedRoles(rt *v3.RoleTemplate) error {
@@ -234,28 +239,20 @@ func (m *manager) ensureNamespacedRoles(rt *v3.RoleTemplate) error {
 
 func (m *manager) updateRole(roleCli typesrbacv1.RoleInterface, rt *v3.RoleTemplate, namespace string) error {
 	if role, err := m.rLister.Get(namespace, rt.Name); err == nil && role != nil {
-		if reflect.DeepEqual(role.Rules, rt.Rules) {
+		err = m.compareAndUpdateNamespacedRole(role, rt, namespace)
+		if err == nil {
 			return nil
 		}
-
-		role = role.DeepCopy()
-		role.Rules = rt.Rules
-		logrus.Infof("Updating role %v in %v because of rules difference with roleTemplate %v (%v).", role.Name, namespace, rt.DisplayName, rt.Name)
-		_, err := roleCli.Update(role)
-		if err != nil && apierrors.IsConflict(err) {
+		if apierrors.IsConflict(err) {
 			// get object from etcd and retry
-			role, err := m.roles.GetNamespaced(namespace, rt.Name, metav1.GetOptions{})
+			role, err = m.roles.GetNamespaced(namespace, rt.Name, metav1.GetOptions{})
 			if err != nil && !apierrors.IsNotFound(err) {
 				return errors.Wrapf(err, "error getting role %v", rt.Name)
 			}
-			if reflect.DeepEqual(role.Rules, rt.Rules) {
-				return nil
+			if err := m.compareAndUpdateNamespacedRole(role, rt, namespace); err != nil {
+				return err
 			}
-			role = role.DeepCopy()
-			role.Rules = rt.Rules
-			_, err = roleCli.Update(role)
-		}
-		if err != nil {
+		} else {
 			return errors.Wrapf(err, "couldn't update role %v", rt.Name)
 		}
 		return nil
@@ -264,6 +261,17 @@ func (m *manager) updateRole(roleCli typesrbacv1.RoleInterface, rt *v3.RoleTempl
 	}
 	// auth/manager.go creates roles based on the prtb/crtb so not repeating it here
 	return nil
+}
+
+func (m *manager) compareAndUpdateNamespacedRole(role *rbacv1.Role, rt *v3.RoleTemplate, namespace string) error {
+	if reflect.DeepEqual(role.Rules, rt.Rules) {
+		return nil
+	}
+	role = role.DeepCopy()
+	role.Rules = rt.Rules
+	logrus.Infof("Updating role %v in %v because of rules difference with roleTemplate %v (%v).", role.Name, namespace, rt.DisplayName, rt.Name)
+	_, err := m.workload.Management.RBAC.Roles("").Update(role)
+	return err
 }
 
 func (m *manager) gatherRoles(rt *v3.RoleTemplate, roleTemplates map[string]*v3.RoleTemplate) error {
