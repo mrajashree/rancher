@@ -30,7 +30,7 @@ func (s *Store) Create(apiContext *types.APIContext, schema *types.Schema, data 
 		return nil, err
 	}
 
-	if err := s.verifyAppExternalIDMatchesProject(apiContext, data); err != nil {
+	if err := s.verifyAppExternalIDMatchesProject(apiContext, data, ""); err != nil {
 		return nil, err
 	}
 
@@ -53,7 +53,7 @@ func (s *Store) Update(apiContext *types.APIContext, schema *types.Schema, data 
 		return nil, err
 	}
 
-	if err := s.verifyAppExternalIDMatchesProject(apiContext, data); err != nil {
+	if err := s.verifyAppExternalIDMatchesProject(apiContext, data, id); err != nil {
 		return nil, err
 	}
 
@@ -128,7 +128,7 @@ func (s *Store) checkAccessToTemplateVersion(apiContext *types.APIContext, data 
 	return nil
 }
 
-func (s *Store) verifyAppExternalIDMatchesProject(apiContext *types.APIContext, data map[string]interface{}) error {
+func (s *Store) verifyAppExternalIDMatchesProject(apiContext *types.APIContext, data map[string]interface{}, id string) error {
 	_, ns, err := s.parseAppExternalID(data)
 	if err != nil {
 		return err
@@ -140,6 +140,17 @@ func (s *Store) verifyAppExternalIDMatchesProject(apiContext *types.APIContext, 
 
 	// check if target project is either same as the ns (project scoped catalog), or belongs in the ns (cluster scoped catalog)
 	projectID := convert.ToString(data["projectId"])
+	if projectID == "" {
+		ns, name := ref.Parse(id)
+		app, err := s.Apps.Get(ns, name)
+		if err != nil {
+			if !errors.IsNotFound(err) {
+				return fmt.Errorf("error getting app %s: %v", id, err)
+			}
+			return nil
+		}
+		projectID = app.Spec.ProjectName
+	}
 	clusterName, projectName := ref.Parse(projectID)
 	if ns == clusterName || ns == projectName {
 		return nil
