@@ -32,6 +32,7 @@ replace (
 	k8s.io/legacy-cloud-providers => k8s.io/legacy-cloud-providers v0.18.0
 	k8s.io/metrics => k8s.io/metrics v0.18.0
 	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.18.0
+	github.com/rancher/wrangler => github.com/mrajashree/wrangler v0.6.2-0.20200723185507-4e5709808e36
 )
 
 require (

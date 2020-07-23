@@ -781,6 +781,10 @@ github.com/morikuni/aec v1.0.0/go.mod h1:BbKIizmSmc5MMPqRYbxO4ZU0S0+P200+tUnFx7P
 github.com/mozilla/tls-observatory v0.0.0-20180409132520-8791a200eb40/go.mod h1:SrKMQvPiws7F7iqYp8/TX+IhxCYhzr6N/1yb8cwHsGk=
 github.com/mozillazg/go-cos v0.13.0/go.mod h1:Zp6DvvXn0RUOXGJ2chmWt2bLEqRAnJnS3DnAZsJsoaE=
 github.com/mozillazg/go-httpheader v0.2.1/go.mod h1:jJ8xECTlalr6ValeXYdOF8fFUISeBAdw6E61aqQma60=
+github.com/mrajashree/wrangler v0.6.2-0.20200508001250-23f8de34a399 h1:THMva18jnU+9vnPBmQOIcpIBmmnZjpilMHYuO42Lw5c=
+github.com/mrajashree/wrangler v0.6.2-0.20200508001250-23f8de34a399/go.mod h1:n5Du/gGD7WoiqnEo0SHnPirDIp1V9Zu+6guc8lXS2dk=
+github.com/mrajashree/wrangler v0.6.2-0.20200723185507-4e5709808e36 h1:NDYePBJzMxHv0nj+DLFcrObqTeFSHdeiYWnbg+XX2Z0=
+github.com/mrajashree/wrangler v0.6.2-0.20200723185507-4e5709808e36/go.mod h1:GSBsgNCMgSgpTXoyto5e35lTm5akYQVPzse5q3/rZ4w=
 github.com/mrjones/oauth v0.0.0-20180629183705-f4e24b6d100c h1:3wkDRdxK92dF+c1ke2dtj7ZzemFWBHB9plnJOtlwdFA=
 github.com/mrjones/oauth v0.0.0-20180629183705-f4e24b6d100c/go.mod h1:skjdDftzkFALcuGzYSklqYd8gvat6F1gZJ4YPVbkZpM=
 github.com/mrunalp/fileutils v0.0.0-20171103030105-7d4729fb3618/go.mod h1:x8F1gnqOkIEiO4rqoeEEEqQbo7HjGMTvyoq3gej4iT0=
@@ -911,6 +915,7 @@ github.com/rancher/client-go v1.18.0-rancher.1 h1:YmROLJNSiBc+BU0MBsJU4QuNXV31Zq
 github.com/rancher/client-go v1.18.0-rancher.1/go.mod h1:uQSYDYs4WhVZ9i6AIoEZuwUggLVEF64HOD37boKAtF8=
 github.com/rancher/dynamiclistener v0.2.1-0.20200714201033-9c1939da3af9 h1:Mo5mPXi7k/TgzMcUIuDpbNxiX2bYh68+yEpaur5Nx80=
 github.com/rancher/dynamiclistener v0.2.1-0.20200714201033-9c1939da3af9/go.mod h1:qr0QfhwzcVCR+Ao9WyfnE+jmOpfEAdRhXtNOZGJ3nCQ=
+github.com/rancher/lasso v0.0.0-20200427171700-e0509f89f319/go.mod h1:6Dw19z1lDIpL887eelVjyqH/mna1hfR61ddCFOG78lw=
 github.com/rancher/lasso v0.0.0-20200515155337-a34e1e26ad91 h1:p4VVl0tr6YAeUILFMCn+0DKzbUOS0ah9biSsL7Sy6S4=
 github.com/rancher/lasso v0.0.0-20200515155337-a34e1e26ad91/go.mod h1:G6Vv2aj6xB2YjTVagmu4NkhBvbE8nBcGykHRENH6arI=
 github.com/rancher/machine v0.15.0-rancher25 h1:i78iohBm9QLmxHOMM1ZssYwSNIObPdDUQjZ9h1mo8Jc=

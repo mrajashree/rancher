@@ -9,6 +9,11 @@ import (
 	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	managementSchema "github.com/rancher/rancher/pkg/schemas/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/types/config"
+	"github.com/rancher/wrangler/pkg/crd"
+	wranglerSchema "github.com/rancher/wrangler/pkg/schemas"
+	"github.com/rancher/wrangler/pkg/schemas/openapi"
+	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -17,11 +22,19 @@ type Controller struct {
 	Schemas *types.Schemas
 	lister  v3.DynamicSchemaLister
 	known   map[string]bool
+	CRDs    clientset.Interface
 }
 
+var nonClusterFields = map[string]bool{"credentialconfig": true, "nodeconfig": true, "cluster": true, "nodetemplateconfig": true}
+
 func Register(ctx context.Context, management *config.ScaledContext, schemas *types.Schemas) {
+	crdFactory, err := crd.NewFactoryFromClient(&management.RESTConfig)
+	if err != nil {
+		return
+	}
 	c := &Controller{
 		Schemas: schemas,
+		CRDs:    crdFactory.CRDClient,
 	}
 	management.Management.DynamicSchemas("").AddHandler(ctx, "dynamic-schema", c.Sync)
 }
@@ -34,7 +47,7 @@ func (c *Controller) Sync(key string, dynamicSchema *v3.DynamicSchema) (runtime.
 		return nil, c.remove(key)
 	}
 
-	return nil, c.add(dynamicSchema)
+	return nil, c.add(dynamicSchema, key)
 }
 
 func (c *Controller) remove(id string) error {
@@ -45,9 +58,14 @@ func (c *Controller) remove(id string) error {
 	return nil
 }
 
-func (c *Controller) add(dynamicSchema *v3.DynamicSchema) error {
+func (c *Controller) add(dynamicSchema *v3.DynamicSchema, key string) error {
 	schema := types.Schema{}
 	if err := convert.ToObj(dynamicSchema.Spec, &schema); err != nil {
+		return err
+	}
+
+	wSchema := wranglerSchema.Schema{}
+	if err := convert.ToObj(dynamicSchema.Spec, &wSchema); err != nil {
 		return err
 	}
 
@@ -92,5 +110,28 @@ func (c *Controller) add(dynamicSchema *v3.DynamicSchema) error {
 		c.Schemas.ForceAddSchema(schema)
 	}
 
-	return nil
+	if nonClusterFields[key] {
+		return nil
+	}
+
+	openapiSchema, err := openapi.SchemaToProps(&wSchema, wranglerSchema.EmptySchemas(), map[string]bool{})
+	if err != nil {
+		return err
+	}
+
+	clusterCRD, err := c.CRDs.ApiextensionsV1beta1().CustomResourceDefinitions().Get(context.Background(), "clusters.management.cattle.io", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	// we need to maintain backwards compatibility with older dynamic schemas that were created before we had the
+	// schema name field
+	if dynamicSchema.Spec.SchemaName != "" {
+		clusterCRD.Spec.Validation.OpenAPIV3Schema.Properties[dynamicSchema.Spec.SchemaName] = *openapiSchema
+	} else {
+		clusterCRD.Spec.Validation.OpenAPIV3Schema.Properties[dynamicSchema.Name] = *openapiSchema
+	}
+
+	_, err = c.CRDs.ApiextensionsV1beta1().CustomResourceDefinitions().Update(context.Background(), clusterCRD, metav1.UpdateOptions{})
+	return err
 }
