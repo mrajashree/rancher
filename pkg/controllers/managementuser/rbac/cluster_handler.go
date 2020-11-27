@@ -62,6 +62,7 @@ func (h *clusterHandler) sync(key string, obj *v3.Cluster) (runtime.Object, erro
 		}
 		return h.clusters.Update(obj)
 	}
+
 	return obj, nil
 }
 

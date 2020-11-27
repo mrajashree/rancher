@@ -3,6 +3,8 @@ package management
 import (
 	"context"
 
+	"github.com/rancher/rancher/pkg/controllers/management/restrictedadminrbac"
+
 	"github.com/rancher/rancher/pkg/clustermanager"
 	"github.com/rancher/rancher/pkg/controllers/management/auth"
 	"github.com/rancher/rancher/pkg/controllers/management/catalog"
@@ -66,6 +68,7 @@ func Register(ctx context.Context, management *config.ManagementContext, manager
 	nodetemplate.Register(ctx, management)
 	rkeworkerupgrader.Register(ctx, management, manager.ScaledContext)
 	rbac.Register(ctx, management)
+	restrictedadminrbac.Register(ctx, management)
 
 	// Register last
 	auth.RegisterLate(ctx, management)
