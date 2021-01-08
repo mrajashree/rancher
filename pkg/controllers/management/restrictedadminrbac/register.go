@@ -24,32 +24,14 @@ func Register(ctx context.Context, management *config.ManagementContext) {
 	informer := management.Management.GlobalRoleBindings("").Controller().Informer()
 	r := rbaccontroller{
 		clusters:     management.Management.Clusters(""),
+		projects:     management.Management.Projects(""),
 		grbLister:    management.Management.GlobalRoleBindings("").Controller().Lister(),
 		grbIndexer:   informer.GetIndexer(),
+		roleBindings: management.RBAC.RoleBindings(""),
 		crLister:     management.RBAC.ClusterRoles("").Controller().Lister(),
 		clusterRoles: management.RBAC.ClusterRoles(""),
 	}
 
 	r.clusters.AddHandler(ctx, "restrictedAdminsRBACCluster", r.clusterRBACSync)
 	r.projects.AddHandler(ctx, "restrictedAdminsRBACProject", r.projectRBACSync)
-}
-
-func RegisterIndexers(ctx context.Context, scaledContext *config.ScaledContext) error {
-	informer := scaledContext.Management.GlobalRoleBindings("").Controller().Informer()
-	indexers := map[string]cache.IndexFunc{
-		grbByRoleIndex: grbByRole,
-	}
-	if err := informer.AddIndexers(indexers); err != nil {
-		return err
-	}
-	return nil
-}
-
-func grbByRole(obj interface{}) ([]string, error) {
-	grb, ok := obj.(*v3.GlobalRoleBinding)
-	if !ok {
-		return []string{}, nil
-	}
-
-	return []string{grb.GlobalRoleName}, nil
 }

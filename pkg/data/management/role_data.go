@@ -666,7 +666,7 @@ func addClusterRoleForNamespacedCRDs(management *config.ManagementContext) error
 
 func createOrUpdateClusterRole(management *config.ManagementContext, cr rbacv1.ClusterRole) error {
 	for _, rule := range cr.Rules {
-		sort.Slice(rule, func(i, j int) bool { return rule.APIGroups[i] < rule.APIGroups[j] })
+		sort.Slice(rule.APIGroups, func(i, j int) bool { return rule.APIGroups[i] < rule.APIGroups[j] })
 	}
 	sort.Slice(cr.Rules, func(i, j int) bool {
 		return cr.Rules[i].APIGroups[0] < cr.Rules[j].APIGroups[0]

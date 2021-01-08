@@ -25,6 +25,10 @@ func (r *rbaccontroller) clusterRBACSync(key string, cluster *v3.Cluster) (runti
 		return nil, nil
 	}
 
+	if cluster.Name == "local" {
+		return nil, nil
+	}
+
 	grbs, err := r.grbIndexer.ByIndex(grbByRoleIndex, rbac.GlobalRestrictedAdmin)
 	if err != nil {
 		return nil, err

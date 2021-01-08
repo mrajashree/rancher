@@ -3,8 +3,6 @@ package managementapi
 import (
 	"context"
 
-	"github.com/rancher/rancher/pkg/controllers/management/restrictedadminrbac"
-
 	normanapi "github.com/rancher/norman/api"
 	"github.com/rancher/rancher/pkg/auth/tokens"
 	"github.com/rancher/rancher/pkg/clustermanager"
@@ -50,9 +48,6 @@ func registerIndexers(ctx context.Context, scaledContext *config.ScaledContext) 
 		return err
 	}
 	if err := auth.RegisterIndexers(ctx, scaledContext); err != nil {
-		return err
-	}
-	if err := restrictedadminrbac.RegisterIndexers(ctx, scaledContext); err != nil {
 		return err
 	}
 	if err := tokens.RegisterIndexer(ctx, scaledContext); err != nil {
