@@ -6,9 +6,6 @@ import (
 	"sort"
 
 	"github.com/hashicorp/go-multierror"
-
-	"k8s.io/client-go/util/retry"
-
 	"github.com/pkg/errors"
 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/rbac"
@@ -22,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/util/retry"
 )
 
 const (

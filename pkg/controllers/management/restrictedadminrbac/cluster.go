@@ -1,23 +1,13 @@
 package restrictedadminrbac
 
 import (
-	"github.com/rancher/norman/types/slice"
-	"github.com/rancher/rancher/pkg/rbac"
-	"k8s.io/client-go/util/retry"
-
-	k8srbac "k8s.io/api/rbac/v1"
-
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
+	"github.com/hashicorp/go-multierror"
 	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
-
+	"github.com/rancher/rancher/pkg/rbac"
+	k8srbac "k8s.io/api/rbac/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-)
-
-const (
-	grbByRoleIndex = "management.cattle.io/grb-by-role"
 )
 
 func (r *rbaccontroller) clusterRBACSync(key string, cluster *v3.Cluster) (runtime.Object, error) {
@@ -35,6 +25,7 @@ func (r *rbaccontroller) clusterRBACSync(key string, cluster *v3.Cluster) (runti
 	}
 
 	var subjects []k8srbac.Subject
+	var returnErr error
 	for _, x := range grbs {
 		grb, _ := x.(*v3.GlobalRoleBinding)
 		restrictedAdminUserName := grb.UserName
@@ -42,34 +33,73 @@ func (r *rbaccontroller) clusterRBACSync(key string, cluster *v3.Cluster) (runti
 			Kind: "User",
 			Name: restrictedAdminUserName,
 		})
-	}
-	_, err = r.roleBindings.Create(&k8srbac.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rbac.RestrictedAdminMgmtRoleBinding,
-			Namespace: cluster.Name,
-		},
-		Subjects: subjects,
-		RoleRef: k8srbac.RoleRef{
-			Name: rbac.ManagementCRDsClusterRole,
-			Kind: "ClusterRole",
-		},
-	})
-	if err != nil && !k8serrors.IsAlreadyExists(err) {
-		return nil, err
+		rbName := grb.Name + rbac.RestrictedAdminMgmtRoleBinding
+		rb, err := r.rbLister.Get(cluster.Name, rbName)
+		if err != nil && !k8serrors.IsNotFound(err) {
+			returnErr = multierror.Append(returnErr, err)
+			continue
+		}
+		if rb != nil {
+			continue
+		}
+		_, err = r.roleBindings.Create(&k8srbac.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      rbName,
+				Namespace: cluster.Name,
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: managementAPIVersion,
+						Kind:       "GlobalRoleBinding",
+						UID:        grb.UID,
+						Name:       grb.Name,
+					},
+				},
+			},
+			RoleRef: k8srbac.RoleRef{
+				Name: rbac.ManagementCRDsClusterRole,
+				Kind: "ClusterRole",
+			},
+			Subjects: []k8srbac.Subject{
+				{
+					Kind: "User",
+					Name: restrictedAdminUserName,
+				},
+			},
+		})
+		if err != nil && !k8serrors.IsAlreadyExists(err) {
+			returnErr = multierror.Append(returnErr, err)
+		}
 	}
 
-	return nil, r.addClusterToRestrictedAdminCR(cluster)
+	if returnErr != nil {
+		return nil, returnErr
+	}
+
+	return nil, r.createCRAndCRBForRestrictedAdminClusterAccess(cluster, subjects)
 }
 
-func (r *rbaccontroller) addClusterToRestrictedAdminCR(cluster *v3.Cluster) error {
-	cr, err := r.crLister.Get("", rbac.RestrictedAdminCRForClusters)
+/* createCRAndCRBForRestrictedAdminClusterAccess creates a CR with the resourceName field containing current cluster's ID. It also creates
+a CRB for binding this CR to all the restricted admins. This way all restricted admins become owners of the cluster*/
+func (r *rbaccontroller) createCRAndCRBForRestrictedAdminClusterAccess(cluster *v3.Cluster, subjects []k8srbac.Subject) error {
+	var returnErr error
+	crName := cluster.Name + rbac.RestrictedAdminCRForClusters
+	_, err := r.crLister.Get("", crName)
 	if err != nil {
 		if !k8serrors.IsNotFound(err) {
 			return err
 		}
 		cr := k8srbac.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: rbac.RestrictedAdminCRForClusters,
+				Name:   crName,
+				Labels: map[string]string{rbac.RestrictedAdminCRForClusters: cluster.Name},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: managementAPIVersion,
+						Kind:       "Cluster",
+						UID:        cluster.UID,
+						Name:       cluster.Name,
+					},
+				},
 			},
 			Rules: []k8srbac.PolicyRule{
 				{
@@ -81,25 +111,44 @@ func (r *rbaccontroller) addClusterToRestrictedAdminCR(cluster *v3.Cluster) erro
 			},
 		}
 		_, err := r.clusterRoles.Create(&cr)
-		return err
-	}
+		if err != nil && !k8serrors.IsAlreadyExists(err) {
+			return err
+		}
 
-	clusters := cr.Rules[0].ResourceNames
-	if slice.ContainsString(clusters, cluster.Name) {
-		return nil
+		crbNamePrefix := cluster.Name + rbac.RestrictedAdminCRBForClusters
+		for _, subject := range subjects {
+			crbName := crbNamePrefix + subject.Name
+			existingCrb, err := r.crbLister.Get("", crbName)
+			if err != nil && !k8serrors.IsNotFound(err) {
+				returnErr = multierror.Append(returnErr, err)
+			}
+			if existingCrb != nil {
+				continue
+			}
+			crb := k8srbac.ClusterRoleBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: crbName,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "management.cattle.io",
+							Kind:       "Cluster",
+							UID:        cluster.UID,
+							Name:       cluster.Name,
+						},
+					},
+				},
+				RoleRef: k8srbac.RoleRef{
+					Kind: "ClusterRole",
+					Name: crName,
+				},
+				Subjects: []k8srbac.Subject{subject},
+			}
+
+			_, err = r.clusterRoleBindings.Create(&crb)
+			if err != nil && !k8serrors.IsAlreadyExists(err) {
+				returnErr = multierror.Append(returnErr, err)
+			}
+		}
 	}
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		crToUpdate, updateErr := r.clusterRoles.Get(rbac.RestrictedAdminCRForClusters, metav1.GetOptions{})
-		if updateErr != nil {
-			return updateErr
-		}
-		clusters := crToUpdate.Rules[0].ResourceNames
-		if slice.ContainsString(clusters, cluster.Name) {
-			return nil
-		}
-		crToUpdate.Rules[0].ResourceNames = append(crToUpdate.Rules[0].ResourceNames, cluster.Name)
-		_, err := r.clusterRoles.Update(crToUpdate)
-		return err
-	})
-	return err
+	return returnErr
 }

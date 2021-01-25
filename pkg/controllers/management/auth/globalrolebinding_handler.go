@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"reflect"
 
+	"k8s.io/apimachinery/pkg/selection"
+
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
 	"github.com/rancher/norman/httperror"
@@ -20,7 +22,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/util/retry"
 )
 
 var (
@@ -37,6 +38,7 @@ const (
 	grbController                      = "mgmt-auth-grb-controller"
 	templateResourceRule               = "templates"
 	templateVersionResourceRule        = "templateversions"
+	managementAPIVersion               = "management.cattle.io/v3"
 )
 
 func newGlobalRoleBindingLifecycle(management *config.ManagementContext, clusterManager *clustermanager.Manager) *globalRoleBindingLifecycle {
@@ -48,6 +50,7 @@ func newGlobalRoleBindingLifecycle(management *config.ManagementContext, cluster
 		clusterRoles:      management.RBAC.ClusterRoles(""),
 		crbClient:         management.RBAC.ClusterRoleBindings(""),
 		crbLister:         management.RBAC.ClusterRoleBindings("").Controller().Lister(),
+		crLister:          management.RBAC.ClusterRoles("").Controller().Lister(),
 		grLister:          management.Management.GlobalRoles("").Controller().Lister(),
 		roles:             management.RBAC.Roles(""),
 		roleLister:        management.RBAC.Roles("").Controller().Lister(),
@@ -62,6 +65,7 @@ type globalRoleBindingLifecycle struct {
 	projectLister     v3.ProjectLister
 	clusterManager    *clustermanager.Manager
 	clusterRoles      rbacv1.ClusterRoleInterface
+	crLister          rbacv1.ClusterRoleLister
 	crbClient         rbacv1.ClusterRoleBindingInterface
 	crbLister         rbacv1.ClusterRoleBindingLister
 	grLister          v3.GlobalRoleLister
@@ -148,7 +152,7 @@ func (grb *globalRoleBindingLifecycle) reconcileGlobalRoleBinding(globalRoleBind
 
 	subject := rbac.GetGRBSubject(globalRoleBinding)
 	if globalRoleBinding.GlobalRoleName == rbac.GlobalRestrictedAdmin {
-		if err := grb.syncDownstreamClusterPermissions(subject); err != nil {
+		if err := grb.syncDownstreamClusterPermissions(subject, globalRoleBinding); err != nil {
 			return err
 		}
 	}
@@ -324,64 +328,53 @@ func (grb *globalRoleBindingLifecycle) addRulesForTemplateAndTemplateVersions(gl
 	return nil
 }
 
-func (grb *globalRoleBindingLifecycle) syncDownstreamClusterPermissions(subject v1.Subject) error {
-	if err := grb.addRestrictedAdminToClustersCRB(subject); err != nil {
+func (grb *globalRoleBindingLifecycle) syncDownstreamClusterPermissions(subject v1.Subject, globalRoleBinding *v3.GlobalRoleBinding) error {
+	if err := grb.addRestrictedAdminToClustersCRB(subject, globalRoleBinding); err != nil {
 		return err
 	}
 
-	return grb.grantRestrictedAdminUserClusterPermissions(subject)
+	return grb.grantRestrictedAdminUserClusterPermissions(subject, globalRoleBinding)
 }
 
-func (grb *globalRoleBindingLifecycle) addRestrictedAdminToClustersCRB(subject v1.Subject) error {
-	// get the CRB for the downstream clusters clusterRole and update its subject list to include this user
-	// the CR for downstream clusters contains a Role that has all clusters' names in the ResourceNames field
-	crb, err := grb.crbLister.Get("", rbac.RestrictedAdminCRBForClusters)
+func (grb *globalRoleBindingLifecycle) addRestrictedAdminToClustersCRB(subject v1.Subject, globalRoleBinding *v3.GlobalRoleBinding) error {
+	// Get CR for each downstream cluster, create CRB with this subject for each such CR
+	r, _ := labels.NewRequirement(rbac.RestrictedAdminCRForClusters, selection.Exists, []string{})
+	crs, err := grb.crLister.List("", labels.NewSelector().Add(*r))
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			_, err := grb.crbClient.Create(&v1.ClusterRoleBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: rbac.RestrictedAdminCRBForClusters,
-				},
-				RoleRef: v1.RoleRef{
-					Kind: "ClusterRole",
-					Name: rbac.RestrictedAdminCRForClusters,
-				},
-				Subjects: []v1.Subject{subject},
-			})
-			return err
-		}
 		return err
 	}
 
-	// CRB exists, so update the subjects list to add the grb
-	existingSubjects := crb.Subjects
-	for _, sub := range existingSubjects {
-		if sub.Name == subject.Name && reflect.DeepEqual(sub, subject) {
-			// this subject is already added to the CRB
-			return nil
+	var returnErr error
+	for _, cr := range crs {
+		clusterName := cr.Labels[rbac.RestrictedAdminCRForClusters]
+		crbName := clusterName + rbac.RestrictedAdminCRBForClusters + globalRoleBinding.Name
+		crb, err := grb.crbLister.Get("", crbName)
+		if err != nil && !apierrors.IsNotFound(err) {
+			returnErr = multierror.Append(returnErr, err)
+			continue
+		}
+		if crb != nil {
+			continue
+		}
+		_, err = grb.crbClient.Create(&v1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            crbName,
+				OwnerReferences: cr.OwnerReferences,
+			},
+			RoleRef: v1.RoleRef{
+				Kind: "ClusterRole",
+				Name: cr.Name,
+			},
+			Subjects: []v1.Subject{subject},
+		})
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			returnErr = multierror.Append(returnErr, err)
 		}
 	}
-
-	// add subject to CRB
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		crbToUpdate, updateErr := grb.crbClient.Get(rbac.RestrictedAdminCRBForClusters, metav1.GetOptions{})
-		if updateErr != nil {
-			return updateErr
-		}
-		existingSubjects := crbToUpdate.Subjects
-		for _, sub := range existingSubjects {
-			if sub.Name == subject.Name && reflect.DeepEqual(sub, subject) {
-				// this subject is already added to the CRB
-				return nil
-			}
-		}
-		crbToUpdate.Subjects = append(crbToUpdate.Subjects, subject)
-		_, err := grb.crbClient.Update(crbToUpdate)
-		return err
-	})
+	return returnErr
 }
 
-func (grb *globalRoleBindingLifecycle) grantRestrictedAdminUserClusterPermissions(subject v1.Subject) error {
+func (grb *globalRoleBindingLifecycle) grantRestrictedAdminUserClusterPermissions(subject v1.Subject, globalRoleBinding *v3.GlobalRoleBinding) error {
 	var returnErr error
 	clusters, err := grb.clusterLister.List("", labels.NewSelector())
 	if err != nil {
@@ -391,13 +384,22 @@ func (grb *globalRoleBindingLifecycle) grantRestrictedAdminUserClusterPermission
 		if cluster.Name == "local" {
 			continue
 		}
-		rb, err := grb.roleBindingLister.Get(cluster.Name, rbac.RestrictedAdminMgmtRoleBinding)
+		rbName := globalRoleBinding.Name + rbac.RestrictedAdminMgmtRoleBinding
+		_, err := grb.roleBindingLister.Get(cluster.Name, rbName)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				_, err := grb.roleBindings.Create(&v1.RoleBinding{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      rbac.RestrictedAdminMgmtRoleBinding,
+						Name:      rbName,
 						Namespace: cluster.Name,
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: managementAPIVersion,
+								Kind:       "GlobalRoleBinding",
+								UID:        globalRoleBinding.UID,
+								Name:       globalRoleBinding.Name,
+							},
+						},
 					},
 					RoleRef: v1.RoleRef{
 						Name: rbac.ManagementCRDsClusterRole,
@@ -411,10 +413,6 @@ func (grb *globalRoleBindingLifecycle) grantRestrictedAdminUserClusterPermission
 				}
 			}
 			returnErr = multierror.Append(returnErr, err)
-		} else {
-			if err := grb.addSubjectToRoleBinding(subject, rb.Subjects, rbac.RestrictedAdminMgmtRoleBinding, cluster.Name); err != nil {
-				returnErr = multierror.Append(returnErr, err)
-			}
 		}
 
 		projects, err := grb.projectLister.List(cluster.Name, labels.NewSelector())
@@ -424,13 +422,22 @@ func (grb *globalRoleBindingLifecycle) grantRestrictedAdminUserClusterPermission
 		}
 
 		for _, project := range projects {
-			rb, err := grb.roleBindingLister.Get(project.Name, rbac.RestrictedAdminProjectRoleBinding)
+			rbName := globalRoleBinding.Name + rbac.RestrictedAdminProjectRoleBinding
+			_, err := grb.roleBindingLister.Get(project.Name, rbName)
 			if err != nil {
 				if apierrors.IsNotFound(err) {
 					_, err := grb.roleBindings.Create(&v1.RoleBinding{
 						ObjectMeta: metav1.ObjectMeta{
-							Name:      rbac.RestrictedAdminProjectRoleBinding,
-							Namespace: cluster.Name,
+							Name:      rbName,
+							Namespace: project.Name,
+							OwnerReferences: []metav1.OwnerReference{
+								{
+									APIVersion: managementAPIVersion,
+									Kind:       "GlobalRoleBinding",
+									UID:        globalRoleBinding.UID,
+									Name:       globalRoleBinding.Name,
+								},
+							},
 						},
 						RoleRef: v1.RoleRef{
 							Name: rbac.ProjectCRDsClusterRole,
@@ -440,146 +447,12 @@ func (grb *globalRoleBindingLifecycle) grantRestrictedAdminUserClusterPermission
 					})
 					if err != nil {
 						returnErr = multierror.Append(returnErr, err)
-						continue
 					}
 				}
-				returnErr = multierror.Append(returnErr, err)
-			} else {
-				if err := grb.addSubjectToRoleBinding(subject, rb.Subjects, rbac.RestrictedAdminProjectRoleBinding, project.Name); err != nil {
-					returnErr = multierror.Append(returnErr, err)
-				}
 			}
 		}
 	}
 	return returnErr
-}
-
-func (grb *globalRoleBindingLifecycle) removeRestrictedAdminPermissions(obj *v3.GlobalRoleBinding) error {
-	subject := rbac.GetGRBSubject(obj)
-	if err := grb.removeRestrictedAdminRBPermissions(subject); err != nil {
-		return err
-	}
-	return grb.removeRestrictedAdminCRBPermissions(subject)
-}
-
-func (grb *globalRoleBindingLifecycle) removeRestrictedAdminRBPermissions(subject v1.Subject) error {
-	var returnErr error
-	clusters, err := grb.clusterLister.List("", labels.NewSelector())
-	if err != nil {
-		return err
-	}
-	for _, cluster := range clusters {
-		if cluster.Name == "local" {
-			continue
-		}
-		clusterRB, err := grb.roleBindingLister.Get(cluster.Name, rbac.RestrictedAdminMgmtRoleBinding)
-		if err != nil {
-			if !apierrors.IsNotFound(err) {
-				returnErr = multierror.Append(returnErr, err)
-			}
-			continue
-		}
-		if err := grb.removeSubjectFromRoleBinding(subject, clusterRB.Subjects, rbac.RestrictedAdminMgmtRoleBinding, cluster.Name); err != nil {
-			returnErr = multierror.Append(returnErr, err)
-		}
-
-		projects, err := grb.projectLister.List(cluster.Name, labels.NewSelector())
-		if err != nil {
-			returnErr = multierror.Append(returnErr, err)
-			continue
-		}
-
-		for _, project := range projects {
-			projectRB, err := grb.roleBindingLister.Get(project.Name, rbac.RestrictedAdminProjectRoleBinding)
-			if err != nil {
-				if !apierrors.IsNotFound(err) {
-					returnErr = multierror.Append(returnErr, err)
-				}
-				continue
-			}
-
-			if err := grb.removeSubjectFromRoleBinding(subject, projectRB.Subjects, rbac.RestrictedAdminProjectRoleBinding, project.Name); err != nil {
-				returnErr = multierror.Append(returnErr, err)
-			}
-		}
-	}
-	return returnErr
-}
-
-func (grb *globalRoleBindingLifecycle) removeRestrictedAdminCRBPermissions(subject v1.Subject) error {
-	clustersCRB, err := grb.crbLister.Get("", rbac.RestrictedAdminCRBForClusters)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	subjectExists, ind := checkSubjectExists(subject, clustersCRB.Subjects)
-	if !subjectExists {
-		return nil
-	}
-	updatedSubjectsList := append(clustersCRB.Subjects[:ind], clustersCRB.Subjects[ind+1:]...)
-	// remove subject from CRB
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		crbToUpdate, updateErr := grb.crbClient.Get(rbac.RestrictedAdminCRBForClusters, metav1.GetOptions{})
-		if updateErr != nil {
-			return updateErr
-		}
-		crbToUpdate.Subjects = updatedSubjectsList
-		_, err := grb.crbClient.Update(crbToUpdate)
-		return err
-	})
-}
-
-func (grb *globalRoleBindingLifecycle) addSubjectToRoleBinding(subject v1.Subject, existingSubjects []v1.Subject, name, ns string) error {
-	for _, sub := range existingSubjects {
-		// subject was already added
-		if sub.Name == subject.Name && reflect.DeepEqual(sub, subject) {
-			return nil
-		}
-	}
-	// add subject to RB
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		rbToUpdate, updateErr := grb.roleBindings.GetNamespaced(ns, name, metav1.GetOptions{})
-		if updateErr != nil {
-			return updateErr
-		}
-		rbToUpdate.Subjects = append(rbToUpdate.Subjects, subject)
-		_, err := grb.roleBindings.Update(rbToUpdate)
-		return err
-	})
-}
-
-func (grb *globalRoleBindingLifecycle) removeSubjectFromRoleBinding(subject v1.Subject, existingSubjects []v1.Subject, name, ns string) error {
-	subjectExists, ind := checkSubjectExists(subject, existingSubjects)
-	if !subjectExists {
-		return nil
-	}
-	updatedSubjectsList := append(existingSubjects[:ind], existingSubjects[ind+1:]...)
-
-	// remove subject from RB
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		rbToUpdate, updateErr := grb.roleBindings.GetNamespaced(ns, name, metav1.GetOptions{})
-		if updateErr != nil {
-			return updateErr
-		}
-		rbToUpdate.Subjects = updatedSubjectsList
-		_, err := grb.roleBindings.Update(rbToUpdate)
-		return err
-	})
-}
-
-func checkSubjectExists(subject v1.Subject, existingSubjects []v1.Subject) (bool, int) {
-	var subjectExists bool
-	var subjectIndex int
-	for ind, sub := range existingSubjects {
-		// subject was already added
-		if sub.Name == subject.Name && reflect.DeepEqual(sub, subject) {
-			subjectExists = true
-			subjectIndex = ind
-		}
-	}
-	return subjectExists, subjectIndex
 }
 
 func IsClusterUnavailable(err error) bool {

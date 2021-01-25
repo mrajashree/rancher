@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pkg/errors"
 	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
+	"github.com/pkg/errors"
 	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	projectpkg "github.com/rancher/rancher/pkg/project"
 	"github.com/rancher/rancher/pkg/settings"
@@ -37,6 +38,7 @@ func (p *pLifecycle) Create(project *v3.Project) (runtime.Object, error) {
 		}
 
 	}
+
 	err := p.ensureNamespacesAssigned(project)
 	return project, err
 }

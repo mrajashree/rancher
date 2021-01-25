@@ -1,6 +1,7 @@
 package restrictedadminrbac
 
 import (
+	"github.com/hashicorp/go-multierror"
 	apimgmtv3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
 	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/rbac"
@@ -15,33 +16,56 @@ func (r *rbaccontroller) projectRBACSync(key string, project *apimgmtv3.Project)
 		return nil, nil
 	}
 
+	if project.Namespace == "local" {
+		return nil, nil
+	}
+
+	var returnErr error
 	grbs, err := r.grbIndexer.ByIndex(grbByRoleIndex, rbac.GlobalRestrictedAdmin)
 	if err != nil {
 		return nil, err
 	}
-	var subjects []k8srbac.Subject
 	for _, x := range grbs {
 		grb, _ := x.(*v3.GlobalRoleBinding)
 		restrictedAdminUserName := grb.UserName
-		subjects = append(subjects, k8srbac.Subject{
-			Kind: "User",
-			Name: restrictedAdminUserName,
+		rbName := grb.Name + rbac.RestrictedAdminProjectRoleBinding
+		rb, err := r.rbLister.Get(project.Name, rbName)
+		if err != nil && !k8serrors.IsNotFound(err) {
+			returnErr = multierror.Append(returnErr, err)
+			continue
+		}
+		if rb != nil {
+			continue
+		}
+		_, err = r.roleBindings.Create(&k8srbac.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      rbName,
+				Namespace: project.Name,
+				Labels:    map[string]string{rbac.RestrictedAdminProjectRoleBinding: "true"},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: managementAPIVersion,
+						Kind:       "GlobalRoleBinding",
+						UID:        grb.UID,
+						Name:       grb.Name,
+					},
+				},
+			},
+			RoleRef: k8srbac.RoleRef{
+				Name: rbac.ProjectCRDsClusterRole,
+				Kind: "ClusterRole",
+			},
+			Subjects: []k8srbac.Subject{
+				{
+					Kind: "User",
+					Name: restrictedAdminUserName,
+				},
+			},
 		})
-	}
-	_, err = r.roleBindings.Create(&k8srbac.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rbac.RestrictedAdminProjectRoleBinding,
-			Namespace: project.Name,
-		},
-		Subjects: subjects,
-		RoleRef: k8srbac.RoleRef{
-			Name: rbac.ProjectCRDsClusterRole,
-			Kind: "ClusterRole",
-		},
-	})
+		if err != nil && !k8serrors.IsAlreadyExists(err) {
+			returnErr = multierror.Append(returnErr, err)
+		}
 
-	if err != nil && !k8serrors.IsAlreadyExists(err) {
-		return nil, err
 	}
-	return nil, nil
+	return nil, returnErr
 }
